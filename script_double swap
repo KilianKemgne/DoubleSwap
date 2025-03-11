@@ -1,0 +1,53 @@
+sudo apt update
+sudo mkdir /usr/data /usr/vm
+sudo chown Kilian /usr/vm/
+sudo mkfs.ext4 /dev/sdb
+sudo mount /dev/sdb /usr/vm/
+echo -e "/dev/sdb   /usr/vm   ext4   defaults   0   2" >> /etc/fstab
+sudo mount -a
+cd /usr/vm
+sudo wget https://github.com/torvalds/linux/archive/refs/tags/v6.12-rc6.tar.gz
+sudo tar -xvf v6.12-rc6.tar.gz
+sudo apt-get install git libglib2.0-dev libfdt-dev libpixman-1-dev zlib1g-dev ninja-build libaio-dev libbluetooth-dev libcapstone-dev libbrlapi-dev libbz2-dev libcap-ng-dev libcurl4-gnutls-dev libgtk-3-dev libibverbs-dev libjpeg8-dev libncurses5-dev libnuma-dev librbd-dev librdmacm-dev libsasl2-dev libsdl2-dev libseccomp-dev libsnappy-dev libssh-dev libvde-dev libvdeplug-dev libvte-2.91-dev libxen-dev liblzo2-dev valgrind xfslibs-dev libnfs-dev libiscsi-dev libslirp-dev build-essential bison flex libncurses-dev libssl-dev libelf-dev dwarves cmake pkg-config clang virt-manager qemu vde2 ebtables dnsmasq bridge-utils dmidecode virt-viewer
+
+cd /usr/vm/linux-6.12-rc6
+sudo make localmodconfig
+sudo chmod -R 777 /usr/vm/ /usr/data
+echo -e "CONFIG_VIRTIO_FS=y" >> .config
+sudo chmod -R 777 /usr/vm/ /usr/data/
+scripts/config --disable SYSTEM_TRUSTED_KEYS
+scripts/config --disable SYSTEM_REVOCATION_KEYS
+scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
+scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+sudo make -j $(nproc)
+sudo make modules_install -j $(nproc)
+sudo make install
+sudo make headers_install INSTALL_HDR_PATH=/usr
+cd ..
+git clone https://gitlab.com/virtio-fs/virtiofsd.git
+cd virtiofsd/
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cargo build --release
+
+/usr/vm/virtiofsd/target/release/virtiofsd --socket-path=/tmp/vhostqemu -o source=/usr/data -o cache=always
+cd ..
+qemu-img create -f qcow2 VM.qcow2 30G
+
+sudo wget https://releases.ubuntu.com/releases/22.04.4/ubuntu-22.04.5-desktop-amd64.iso
+
+sudo qemu-system-x86_64   -enable-kvm   -m 30720   -smp 20   -drive file=/usr/vm/VM.qcow2,format=qcow2   -cdrom ubuntu-22.04.5-desktop-amd64.iso   -boot d   -vga virtio   -net nic,model=virtio   -net user   -vnc :1
+
+sudo wget https://download.qemu.org/qemu-9.0.0.tar.xz
+sudo tar xJvf qemu-9.0.0.tar.xz
+cd qemu-9.0.0/accel/kvm/
+sudo rm kvm-all.c
+sudo nano kvm-all.c 
+sudo apt install python3-pip
+pip install sphinx==5.3.0 sphinx_rtd_theme==1.1.1
+cd ../../
+sudo mkdir build
+cd build/
+sudo ../configure --prefix=$PWD --target-list=x86_64-softmmu --enable-debug
+sudo make -j $(nproc)
+
+sudo /usr/vm/qemu-9.0.0/build/qemu-system-x86_64 -name cypher -machine pc-q35-6.2,accel=kvm,usb=off -cpu host -drive file=/usr/vm/VM.qcow2,if=virtio -m 50G -smp 20 -net nic,model=virtio -net user -vga virtio -vnc :1 -enable-kvm -chardev socket,id=char0,path=/tmp/vhostqemu -device vhost-user-fs-pci,queue-size=1024,chardev=char0,tag=data -object memory-backend-file,id=mem,size=50G,mem-path=/dev/shm,share=on -numa node,memdev=mem
