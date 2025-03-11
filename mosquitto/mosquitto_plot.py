@@ -8,52 +8,70 @@ import threading
 interval = 0.01
 duration = 7200
 mosquitto_process_name = "mosquitto"
-mosquitto_port = 6379
+app_process_name = "app"  # Remplacez par le nom du processus de votre application
 
 timestamps = []
 perf_timestamps = []
 cpu_usage = []
 cpu_usage_cpu2 = []
 memory_usage = []
+app_memory_usage = []  # Pour stocker l'utilisation mémoire de l'application `app`
 disk_io_read = []
 disk_io_write = []
 children_data = {}
 
-def find_mosquitto_process():
+def find_process(process_name):
+    """Trouve un processus par son nom."""
     for proc in psutil.process_iter(['pid', 'name']):
-        if proc.info['name'] == mosquitto_process_name:
+        if proc.info['name'] == process_name:
             return proc
     return None
 
-def is_mosquitto_running(proc):
+def is_process_running(proc):
+    """Vérifie si un processus est en cours d'exécution."""
     try:
         return proc.is_running()
     except psutil.NoSuchProcess:
         return False
 
-def collect_data(proc, interval, duration):
+def collect_data(mosquitto_proc, interval, duration):
+    """Collecte les données pour mosquitto, ses enfants et l'application `app`."""
     start_time = time.time()
-    while time.time() - start_time < duration:
-        if not is_mosquitto_running(proc):
-            print("Le processus Mosquitto n'est plus en cours d'exécution. Arrêt de la collecte...")
-            break
+    app_proc = None  # Initialisation du processus de l'application `app`
+    app_start_time = None  # Temps de démarrage de l'application `app`
 
+    while time.time() - start_time < duration:
         current_time = datetime.now()
         timestamps.append(current_time)
 
-        cpu_usage.append(proc.cpu_percent(interval=interval))
+        # Collecter les données pour mosquitto
+        if is_process_running(mosquitto_proc):
+            cpu_usage.append(mosquitto_proc.cpu_percent(interval=interval))
+            memory_usage.append(mosquitto_proc.memory_info().rss / (1024 * 1024))  # en Mo
+            disk_io = mosquitto_proc.io_counters()
+            disk_io_read.append(disk_io.read_bytes / (1024 * 1024))  # en Mo
+            disk_io_write.append(disk_io.write_bytes / (1024 * 1024))  # en Mo
+        else:
+            print("Le processus mosquitto n'est plus en cours d'exécution. Arrêt de la collecte...")
+            break
 
-        memory_usage.append(proc.memory_info().rss / (1024 * 1024))
+        # Vérifier si l'application `app` est lancée
+        if app_proc is None:
+            app_proc = find_process(app_process_name)
+            if app_proc:
+                app_start_time = time.time()  # Enregistrer le temps de démarrage de l'application `app`
+                print(f"Processus {app_process_name} trouvé (PID={app_proc.pid}). Début de la collecte des données.")
 
-        disk_io = proc.io_counters()
-        disk_io_read.append(disk_io.read_bytes / (1024 * 1024))
-        disk_io_write.append(disk_io.write_bytes / (1024 * 1024))
+        # Collecter les données pour l'application `app` si elle est en cours d'exécution
+        if app_proc and is_process_running(app_proc):
+            app_memory_usage.append(app_proc.memory_info().rss / (1024 * 1024))  # en Mo
+        else:
+            app_memory_usage.append(0)  # Si l'application n'est pas en cours d'exécution
 
         time.sleep(interval)
 
 def collect_perf_data_for_child(pid, interval, duration, data_list):
-    # start_time = time.time()
-    # while time.time() - start_time < duration:
+    """Collecte les données de performance pour un processus enfant."""
     if not psutil.pid_exists(pid):
         print(f"Le processus {pid} n'est plus en cours d'exécution. Arrêt de la collecte perf...")
         return
@@ -71,31 +89,30 @@ def collect_perf_data_for_child(pid, interval, duration, data_list):
             if "CPUs utilized" in line:
                 parts = line.split()
                 cpu_utilized_index = parts.index("CPUs") - 1
-                
                 try:
                     cpu_utilized = float(parts[cpu_utilized_index].replace(",", "."))
                     cpu_utilized_percent = cpu_utilized * 100
                     data_list.append(cpu_utilized_percent)
                 except ValueError:
-                    # print(f"Valeur invalide pour CPU utilisé: {parts[cpu_utilized_index]}. Ignorée.")
                     print(".")
                 break
 
-def collect_child_data(proc, interval, duration):
+def collect_child_data(mosquitto_proc, interval, duration):
+    """Collecte les données pour les processus enfants de mosquitto."""
     start_time = time.time()
     while time.time() - start_time < duration:
-        if not is_mosquitto_running(proc):
-            print("Le processus Mosquitto n'est plus en cours d'exécution. Arrêt de la collecte des enfants...")
+        if not is_process_running(mosquitto_proc):
+            print("Le processus mosquitto n'est plus en cours d'exécution. Arrêt de la collecte des enfants...")
             break
 
-        children = proc.children()
+        children = mosquitto_proc.children()
         for child in children:
             if child.pid not in children_data:
-                children_data[child.pid] = {'timestamps': [], 'cpu_usage': [], 'disk_io_read': [], 'disk_io_write': [], 'cpu_usage_perf': []}
+                children_data[child.pid] = {'timestamps': [], 'memory_usage': [], 'disk_io_read': [], 'disk_io_write': [], 'cpu_usage_perf': []}
 
             current_time = datetime.now()
             children_data[child.pid]['timestamps'].append(current_time)
-            # children_data[child.pid]['cpu_usage'].append(child.cpu_percent(interval=interval))
+            children_data[child.pid]['memory_usage'].append(child.memory_info().rss / (1024 * 1024))  # en Mo
             disk_io = child.io_counters()
             children_data[child.pid]['disk_io_read'].append(disk_io.read_bytes / (1024 * 1024))  # en Mo
             children_data[child.pid]['disk_io_write'].append(disk_io.write_bytes / (1024 * 1024))  # en Mo
@@ -105,100 +122,89 @@ def collect_child_data(proc, interval, duration):
         time.sleep(interval)
 
 def save_data_to_files():
-    # with open('cpu_usage.txt', 'w') as cpu_file:
-    #     for timestamp, cpu in zip(timestamps, cpu_usage):
-    #         cpu_file.write(f"{timestamp.strftime('%H:%M')}: {cpu}\n")
-
+    """Sauvegarde les données collectées dans des fichiers."""
     with open('cpu_usage_cpu2.txt', 'w') as cpu2_file:
         for timestamp, cpu2 in zip(perf_timestamps, cpu_usage_cpu2):
-            cpu2_file.write(f"{timestamp.strftime('%H:%M')}: {cpu2}\n")
+            cpu2_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {cpu2}\n")
 
     with open('memory_usage.txt', 'w') as memory_file:
         for timestamp, memory in zip(timestamps, memory_usage):
-            memory_file.write(f"{timestamp.strftime('%H:%M')}: {memory}\n")
+            memory_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {memory}\n")
+
+    with open('app_memory_usage.txt', 'w') as app_memory_file:
+        for timestamp, memory in zip(timestamps, app_memory_usage):
+            app_memory_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {memory}\n")
 
     with open('disk_io_read.txt', 'w') as disk_read_file:
         for timestamp, read in zip(timestamps, disk_io_read):
-            disk_read_file.write(f"{timestamp.strftime('%H:%M')}: {read}\n")
+            disk_read_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {read}\n")
 
     with open('disk_io_write.txt', 'w') as disk_write_file:
         for timestamp, write in zip(timestamps, disk_io_write):
-            disk_write_file.write(f"{timestamp.strftime('%H:%M')}: {write}\n")
+            disk_write_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {write}\n")
 
     for pid, data in children_data.items():
-        # with open(f'child_{pid}_cpu_usage.txt', 'w') as child_cpu_file:
-        #     for timestamp, cpu in zip(data['timestamps'], data['cpu_usage']):
-        #         child_cpu_file.write(f"{timestamp.strftime('%H:%M')}: {cpu}\n")
+        with open(f'child_{pid}_memory_usage.txt', 'w') as child_memory_file:
+            for timestamp, memory in zip(data['timestamps'], data['memory_usage']):
+                child_memory_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {memory}\n")
 
         with open(f'child_{pid}_disk_io_read.txt', 'w') as child_disk_read_file:
             for timestamp, read in zip(data['timestamps'], data['disk_io_read']):
-                child_disk_read_file.write(f"{timestamp.strftime('%H:%M')}: {read}\n")
+                child_disk_read_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {read}\n")
 
         with open(f'child_{pid}_disk_io_write.txt', 'w') as child_disk_write_file:
             for timestamp, write in zip(data['timestamps'], data['disk_io_write']):
-                child_disk_write_file.write(f"{timestamp.strftime('%H:%M')}: {write}\n")
+                child_disk_write_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {write}\n")
 
         with open(f'child_{pid}_cpu_usage_perf.txt', 'w') as child_cpu_perf_file:
             for timestamp, cpu in zip(data['timestamps'], data['cpu_usage_perf']):
-                child_cpu_perf_file.write(f"{timestamp.strftime('%H:%M')}: {cpu}\n")
+                child_cpu_perf_file.write(f"{timestamp.strftime('%H:%M:%S.%f')}: {cpu}\n")
 
 def plot_data():
+    """Trace les graphiques pour mosquitto, ses enfants et l'application `app`."""
     start_time = timestamps[0]
-    time_in_minutes = [(t - start_time).total_seconds() / 60 for t in timestamps[:len(memory_usage)]]
+    time_in_minutes = [(t - start_time).total_seconds() / 60 for t in timestamps]
 
-    # with SSD
-    # zones = [
-    #     (0, 40, 'Loading', 'lightblue'),
-    #     # (20, 30, 'Pause', 'lightgray'),
-    #     # (40, 80, 'Dump', 'lightgreen'),
-    #     # (80, 220, 'Perturbation', 'lightcoral'),
-    #     (40, 160, 'Perturbation', 'lightcoral'),
-    #     # (330, 340, 'Pause', 'lightgray'),
-    #     (160, time_in_minutes[-1], 'Double Swap', 'lightyellow')
-    # ]
-
-    # with HDD
+    # Zones pour les graphiques
     zones = [
-        (0, 40, 'Loading', 'lightblue'),
-        # (20, 30, 'Pause', 'lightgray'),
-        (40, max(time_in_minutes), 'Dump', 'lightgreen'),
-        # (102, 432, 'Perturbation', 'lightcoral'),
-        # (110, 330, 'Perturbation', 'lightcoral'),
-        # (330, 340, 'Pause', 'lightgray'),
-        # (432, time_in_minutes[-1], 'Double Swap', 'lightyellow')
+        (0, 10, 'Loading', 'lightblue'),
+        (10, 20, 'Pause', 'lightgray'),
+        (20, 50, 'Dump', 'lightgreen'),
+        (50, 60, 'Pause', 'lightgray'),
+        (60, 46, 'Perturbation', 'lightcoral'),
+        (46, 56, 'Pause', 'lightgray'),
+        (56, max(time_in_minutes), 'Double Swap', 'lightyellow')
     ]
 
     def add_zones():
         for start, end, label, color in zones:
             plt.axvspan(start / 60, end / 60, color=color, alpha=0.3, label=label)
-            # plt.axvline(x=start / 60, color='black', linestyle='--', linewidth=0.5)
-            # plt.axvline(x=end / 60, color='black', linestyle='--', linewidth=0.5)
-            # plt.text((start + end) / 120, plt.ylim()[1] * 0.95, f'{start}s - {end}s', 
-            #          rotation=90, fontsize=8, color='black', ha='center', va='top')
 
-
-    # Figure 3 : Memory Usage
+    # Figure 1 : Memory Usage (mosquitto, App et enfants de mosquitto)
     plt.figure(figsize=(12, 6))
-    plt.plot(time_in_minutes, memory_usage, label='Memory Usage (MB)', color='green')
+    plt.plot(time_in_minutes[:len(memory_usage)], memory_usage, label='Memory Usage Mosquitto (MB)', color='blue')
+    plt.plot(time_in_minutes[:len(app_memory_usage)], app_memory_usage, label='Memory Usage Disturber (MB)', color='red', linestyle='--')
+    for pid, data in children_data.items():
+        time_in_minutes_child = [(t - start_time).total_seconds() / 60 for t in data['timestamps']]
+        plt.plot(time_in_minutes_child, data['memory_usage'], label=f'Memory Usage (Child PID={pid}, MB)', linestyle=':', color='green')
     add_zones()
     plt.xlabel('Time (minutes)')
     plt.ylabel('Memory Usage (MB)')
-    plt.title('Memory Usage by Mosquitto')
+    plt.title('Memory Usage by Mosquitto, App, and mosquitto Children')
     plt.legend(loc="upper right")
     plt.xticks(range(int(time_in_minutes[-1]) + 1))
     plt.tight_layout()
-    plt.savefig('mosquitto_memory_usage.png')
-    plt.show()
+    plt.savefig('memory_usage_mosquitto_app_children.png')
 
     time_in_minutes_io = [(t - start_time).total_seconds() / 60 for t in timestamps[:len(disk_io_read)]]
     # Figure 2 : Disk I/O (Parent and Children)
     plt.figure(figsize=(12, 6))
-    plt.plot(time_in_minutes_io, disk_io_read, label='Disk Read (Parent, MB)', color='red')
-    plt.plot(time_in_minutes_io, disk_io_write, label='Disk Write (Parent, MB)', color='orange')
+    plt.plot(time_in_minutes_io, disk_io_read, label='Disk Read (Parent, MB)', color='blue')
+    # plt.plot(time_in_minutes_io, disk_io_write, label='Disk Write (Parent, MB)', color='orange')
     for pid, data in children_data.items():
         time_in_minutes_child = [(t - start_time).total_seconds() / 60 for t in data['timestamps']]
         plt.plot(time_in_minutes_child, data['disk_io_read'], label=f'Disk Read (Child PID={pid}, MB)', linestyle='--')
-        plt.plot(time_in_minutes_child, data['disk_io_write'], label=f'Disk Write (Child PID={pid}, MB)', linestyle='--')
+        # plt.plot(time_in_minutes_child, data['disk_io_write'], label=f'Disk Write (Child PID={pid}, MB)', linestyle='--')
     add_zones()
     plt.xlabel('Time (minutes)')
     plt.ylabel('Disk IO (MB)')
@@ -207,7 +213,7 @@ def plot_data():
     plt.xticks(range(int(time_in_minutes[-1]) + 1))
     plt.tight_layout()
     plt.savefig('mosquitto_disk_io_with_children.png')
-    plt.show()
+    # plt.show()
 
     # Figure 1 : CPU Usage (Parent and Children via perf)
     plt.figure(figsize=(12, 6))
@@ -224,7 +230,7 @@ def plot_data():
     plt.xticks(range(int(time_in_minutes[-1]) + 1))
     plt.tight_layout()
     plt.savefig('mosquitto_cpu_usage_with_children_perf.png')
-    plt.show()
+    # plt.show()
     
 
     # Figure 1 : Utilisation du CPU (parent et enfants)
@@ -235,7 +241,7 @@ def plot_data():
     #     plt.plot(time_in_minutes_child, data['cpu_usage'], label=f'CPU Usage (Child PID={pid}, %)', linestyle='--')
     # plt.xlabel('Temps (minutes)')
     # plt.ylabel('CPU Usage (%)')
-    # plt.title('Utilisation du CPU par Mosquitto (Parent et Enfants)')
+    # plt.title('Utilisation du CPU par mosquitto (Parent et Enfants)')
     # plt.legend(loc="upper right")
     # plt.xticks(range(int(time_in_minutes[-1]) + 1))
     # plt.tight_layout()
@@ -248,7 +254,7 @@ def plot_data():
     # plt.plot(time_in_minutes, network_io_recv, label='Network Received (Parent, Mo)', color='magenta')
     # plt.xlabel('Temps (minutes)')
     # plt.ylabel('Network IO (Mo)')
-    # plt.title('Activité réseau sur le port Mosquitto (Parent)')
+    # plt.title('Activité réseau sur le port mosquitto (Parent)')
     # plt.legend(loc="upper right")
     # plt.xticks(range(int(time_in_minutes[-1]) + 1))
     # plt.tight_layout()
@@ -260,6 +266,8 @@ def collect_perf_data(pid, interval, duration, data_list):
     while time.time() - start_time < duration:
         if not psutil.pid_exists(pid):
             print(f"Le processus {pid} n'est plus en cours d'exécution. Arrêt de la collecte perf...")
+            save_data_to_files()
+            plot_data()
             break
 
         command = f"perf stat -p {pid} -e cpu-clock sleep {interval} > perf_temp.txt 2>&1"
@@ -293,10 +301,10 @@ def collect_perf_data(pid, interval, duration, data_list):
 
 if __name__ == "__main__":
     try:
-        mosquitto_proc = find_mosquitto_process()
+        mosquitto_proc = find_process(mosquitto_process_name)
         if not mosquitto_proc:
             raise Exception(f"Processus '{mosquitto_process_name}' introuvable.")
-        print(f"Processus Mosquitto trouvé (PID={mosquitto_proc.pid}).")
+        print(f"Processus mosquitto trouvé (PID={mosquitto_proc.pid}).")
 
         print("Démarrage de la collecte des données CPU sur le CPU 2 avec perf...")
         perf_thread = threading.Thread(target=collect_perf_data, args=(mosquitto_proc.pid, interval, duration, cpu_usage_cpu2))
