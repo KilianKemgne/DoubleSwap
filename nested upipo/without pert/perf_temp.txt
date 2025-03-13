@@ -1,0 +1,7 @@
+
+ Performance counter stats for process id '396324':
+
+              0,04 msec cpu-clock                 #    0,004 CPUs utilized          
+
+       0,010858310 seconds time elapsed
+
