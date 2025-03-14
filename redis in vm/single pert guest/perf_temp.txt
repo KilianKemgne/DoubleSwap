@@ -1,0 +1,7 @@
+
+ Performance counter stats for process id '939372':
+
+              0,22 msec cpu-clock                 #    0,021 CPUs utilized          
+
+       0,010794814 seconds time elapsed
+
